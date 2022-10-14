@@ -1,4 +1,12 @@
-## TO generate archive torch model
+## Installation
+```
+sudo apt install --no-install-recommends -y openjdk-11-jre-headless
+```
+```
+pip install torch torchserve torch-model-archiver torch-workflow-archiver
+```
+
+## To generate archive torch model
 ```
 ./generate_model_archive.sh
 ```
