@@ -2,7 +2,9 @@ import torch
 import logging
 import transformers
 import os
+import time
 import json
+from abc import ABC
 
 from ts.torch_handler.base_handler import BaseHandler
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
@@ -10,7 +12,11 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 logger = logging.getLogger(__name__)
 logger.info(f"Transformer version {transformers.__version__}")
 
-class ModelHandler(BaseHandler):
+class ModelHandler(BaseHandler, ABC):
+    def __init__(self):
+        super(ModelHandler, self).__init__()
+        self.initialized = False
+
     def initialize(self, context):
         """Initialize function loads the model and the tokenizer
 
@@ -23,54 +29,31 @@ class ModelHandler(BaseHandler):
             tokenizer is missing
 
         """
-        properties = context.system_properties
         self.manifest = context.manifest
+
+        properties = context.system_properties
         model_dir = properties.get("model_dir")
+        self.device = torch.device("cuda:" + str(properties.get("gpu_id")) if torch.cuda.is_available() else "cpu")
 
-        # get logger info with model serve
-        # logger.info(f'Properties: {properties}')
-        # logger.info(f'Manifest: {self.manifest}')
-        # model serve logs
-        # MODEL_LOG - Properties: {'model_dir': '/tmp/models/f670e3161d2e4379a7d4430d69d22719', 'gpu_id': None, 'batch_size': 1, 'server_name': 'MMS', 'server_version': '0.6.0', 'limit_max_image_pixels': True}
-        # MODEL_LOG - Manifest: {'createdOn': '14/10/2022 22:10:12', 'runtime': 'python', 'model': {'modelName': 'BERTweetSentimentAnalysis', 'handler': 'handler.py', 'modelFile': 'pytorch_model.bin', 'modelVersion': '1.0'}, 'archiverVersion': '0.6.0'}
-        
-
-        self.device = torch.device(
-            "cuda:" + str(properties.get("gpu_id"))
-            if torch.cuda.is_available() and properties.get("gpu_id") is not None else "cpu" 
-        )
-        logger.info(f"Using device {self.device}")
-
-        # load the model
-        model_file = self.manifest['model']['modelFile']
-        model_path = os.path.join(model_dir, model_file)
-
-        if os.path.isfile(model_path):
-            self.model = AutoModelForSequenceClassification.from_pretrained(model_dir)
-            self.model.to(self.device)
-            self.model.eval()
-            logger.info(f'Successfully loaded model from {model_file}')
-        else:
-            raise RuntimeError('Missing the model file')
-
-        # load the tokenizer
+        # Read model serialize/pt file
+        self.model = AutoModelForSequenceClassification.from_pretrained(model_dir)
         self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
-        if self.tokenizer is None:
-            logger.info('Successfully loaded tokenizer')
-        else:
-            raise RuntimeError('Missing tokenizer')
 
-        # load mapping file
-        mapping_file_path = os.path.join(model_dir, 'index_to_name.json')
+        self.model.to(self.device)
+        self.model.eval()
+
+        logger.debug('Transformer model from path {0} loaded successfully'.format(model_dir))
+
+        # Read the mapping file, index to object name
+        mapping_file_path = os.path.join(model_dir, "index_to_name.json")
+
         if os.path.isfile(mapping_file_path):
             with open(mapping_file_path) as f:
                 self.mapping = json.load(f)
-            logger.info('Successfully loaded mapping file')
         else:
-            logger.warning('Mapping file is not detected')
+            logger.warning('Missing the index_to_name.json file. Inference output will not include class name.')
 
         self.initialized = True
-
 
     def preprocess(self, requests):
         """Tokenize the input text using the suitable tokenizer and convert 
@@ -100,7 +83,7 @@ class ModelHandler(BaseHandler):
             inputs: tensor of tokenized data
         """
         outputs = self.model(**inputs.to(self.device))
-        probabilities = torch.nn.functional.sofymax(outputs.logits, dim=-1)
+        probabilities = torch.nn.functional.softmax(outputs.logits, dim=-1)
         predictions = torch.argmax(probabilities, axis=1)
         predictions = predictions.tolist()
         logger.info('Predictions successfully created.')
@@ -121,3 +104,24 @@ class ModelHandler(BaseHandler):
         logger.info(f'PREDICTED LABELS: {predictions}')
 
         return [predictions]
+
+    def handle(self, data, context):
+
+        # It can be used for pre or post processing if needed as additional request
+        # information is available in context
+        
+        start_time = time.time()
+        
+        self.context = context
+        metrics = self.context.metrics
+        
+        data_preprocess = self.preprocess(data)
+        data_inference = self.inference(data_preprocess)
+        data_postprocess = self.postprocess(data_inference)
+        
+        
+        
+        stop_time = time.time()
+        metrics.add_time('HandlerTime', round((stop_time - start_time) * 1000, 2), None, 'ms')
+        
+        return data_postprocess
